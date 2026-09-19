@@ -1,0 +1,62 @@
+name: build llama.cpp v68 hexagon (arm64 windows)
+
+# Builds, on a native Windows arm64 runner:
+#   * the hexagon backend host libraries (ggml-hexagon)
+#   * the HTP skels for v68..v81 (built with the Hexagon SDK's own toolchain)
+# Source commit dda305e is the one that carries Hexagon v68/v69 support.
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: windows-11-arm
+    timeout-minutes: 120
+    steps:
+      - name: fetch llama.cpp (v68 support commit)
+        shell: pwsh
+        run: |
+          curl.exe -sL -o llama.tar.gz https://github.com/ggml-org/llama.cpp/archive/dda305e964f924143fe54cdfceb123aeac72d1bc.tar.gz
+          tar.exe -xzf llama.tar.gz
+          Get-ChildItem -Directory | Select-Object -ExpandProperty Name
+
+      - name: fetch trimmed Hexagon SDK (arm64-wos)
+        shell: pwsh
+        run: |
+          curl.exe -sL -o sdk.tar.xz https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.6.0.0/hexagon-sdk-v6.6.0.0-arm64-wos.tar.xz
+          New-Item -ItemType Directory -Force -Path C:\Qualcomm | Out-Null
+          tar.exe -xf sdk.tar.xz -C C:\Qualcomm
+          Get-ChildItem C:\Qualcomm | Select-Object -ExpandProperty Name
+          Test-Path 'C:\Qualcomm\6.6.0.0\tools\HEXAGON_Tools\19.0.07\Tools\bin\hexagon-clang.exe'
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: build
+        shell: pwsh
+        run: |
+          $sdk = 'C:\Qualcomm\6.6.0.0'
+          $env:HEXAGON_SDK_ROOT   = $sdk
+          $env:HEXAGON_TOOLS_ROOT = "$sdk\tools\HEXAGON_Tools\19.0.07"
+          cd llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc
+          cmake -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGGML_HEXAGON=ON `
+            -DGGML_OPENCL=OFF `
+            -DLLAMA_CURL=OFF `
+            -DLLAMA_BUILD_TESTS=OFF `
+            -DLLAMA_BUILD_EXAMPLES=ON
+          cmake --build build -j 4
+          "=== artifacts ==="
+          Get-ChildItem build/bin -ErrorAction SilentlyContinue | Select-Object Name,Length
+          Get-ChildItem build -Recurse -Filter 'libggml-htp-*.so' | Select-Object FullName,Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llama-v68-arm64-windows
+          path: |
+            llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc/build/bin
+            llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc/build/**/libggml-htp-*.so
+          if-no-files-found: warn
