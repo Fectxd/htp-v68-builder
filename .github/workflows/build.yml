@@ -1,9 +1,12 @@
 name: build llama.cpp v68 hexagon (arm64 windows)
 
-# Builds, on a native Windows arm64 runner:
-#   * the hexagon backend host libraries (ggml-hexagon)
+# Builds on a native Windows arm64 runner:
+#   * ggml-hexagon host libraries (llama.cpp with the Hexagon NPU backend)
 #   * the HTP skels for v68..v81 (built with the Hexagon SDK's own toolchain)
+#
 # Source commit dda305e is the one that carries Hexagon v68/v69 support.
+# Compiler: clang-cl (ggml rejects MSVC for ARM). Flags mirror the official
+# docs/backend/snapdragon/CMakeUserPresets.json "arm64-windows-snapdragon" preset.
 
 on:
   workflow_dispatch:
@@ -19,7 +22,6 @@ jobs:
         run: |
           curl.exe -sL -o llama.tar.gz https://github.com/ggml-org/llama.cpp/archive/dda305e964f924143fe54cdfceb123aeac72d1bc.tar.gz
           tar.exe -xzf llama.tar.gz
-          Get-ChildItem -Directory | Select-Object -ExpandProperty Name
 
       - name: fetch trimmed Hexagon SDK (arm64-wos)
         shell: pwsh
@@ -27,36 +29,57 @@ jobs:
           curl.exe -sL -o sdk.tar.xz https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.6.0.0/hexagon-sdk-v6.6.0.0-arm64-wos.tar.xz
           New-Item -ItemType Directory -Force -Path C:\Qualcomm | Out-Null
           tar.exe -xf sdk.tar.xz -C C:\Qualcomm
-          Get-ChildItem C:\Qualcomm | Select-Object -ExpandProperty Name
           Test-Path 'C:\Qualcomm\6.6.0.0\tools\HEXAGON_Tools\19.0.07\Tools\bin\hexagon-clang.exe'
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: arm64
 
-      - name: build
+      - name: ensure llvm clang
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang-cl -ErrorAction SilentlyContinue)) {
+            winget install --id LLVM.LLVM --accept-package-agreements --accept-source-agreements --disable-interactivity
+            $p = Get-ChildItem 'C:\Program Files\LLVM\bin' -Filter clang-cl.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($p) { $p.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8 }
+          }
+          clang-cl --version
+
+      - name: configure and build
         shell: pwsh
         run: |
           $sdk = 'C:\Qualcomm\6.6.0.0'
           $env:HEXAGON_SDK_ROOT   = $sdk
           $env:HEXAGON_TOOLS_ROOT = "$sdk\tools\HEXAGON_Tools\19.0.07"
+          $arch = '-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -D_GNU_SOURCE'
           cd llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc
           cmake -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=clang-cl `
+            -DCMAKE_CXX_COMPILER=clang-cl `
+            -DCMAKE_C_FLAGS="$arch" `
+            -DCMAKE_CXX_FLAGS="$arch" `
+            -DHEXAGON_SDK_ROOT="$sdk" `
+            -DHEXAGON_TOOLS_ROOT="$env:HEXAGON_TOOLS_ROOT" `
             -DGGML_HEXAGON=ON `
             -DGGML_OPENCL=OFF `
+            -DGGML_OPENMP=OFF `
+            -DGGML_LLAMAFILE=OFF `
+            -DGGML_CCACHE=OFF `
+            -DLLAMA_OPENSSL=OFF `
             -DLLAMA_CURL=OFF `
-            -DLLAMA_BUILD_TESTS=OFF `
-            -DLLAMA_BUILD_EXAMPLES=ON
+            -DLLAMA_BUILD_TESTS=OFF
           cmake --build build -j 4
-          "=== artifacts ==="
+          Write-Host "=== binaries ==="
           Get-ChildItem build/bin -ErrorAction SilentlyContinue | Select-Object Name,Length
+          Write-Host "=== skels ==="
           Get-ChildItem build -Recurse -Filter 'libggml-htp-*.so' | Select-Object FullName,Length
 
       - uses: actions/upload-artifact@v4
         with:
           name: llama-v68-arm64-windows
           path: |
-            llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc/build/bin
+            llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc/build/bin/*.exe
+            llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc/build/bin/*.dll
             llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc/build/**/libggml-htp-*.so
           if-no-files-found: warn
