@@ -1,35 +1,43 @@
-name: build llama.cpp v68 hexagon (arm64 windows)
+name: build llama.cpp / whisper.cpp with Hexagon v68 (arm64 windows)
 
-# Builds on a native Windows arm64 runner:
-#   * ggml-hexagon host libraries (llama.cpp with the Hexagon NPU backend)
-#   * the HTP skels for v68..v81 (built with the Hexagon SDK's own toolchain)
+# Runs on a native Windows arm64 runner.
+#   job "llama"   : llama.cpp @ dda305e (the commit that carries Hexagon v68/v69 support)
+#   job "whisper" : whisper.cpp with that same ggml-hexagon backend copied in
+# Both build host binaries with clang-cl (ggml rejects MSVC on ARM) plus the HTP skels
+# for v68..v81 using the Hexagon SDK's own toolchain.
 #
-# Source commit dda305e is the one that carries Hexagon v68/v69 support.
-# Compiler: clang-cl (ggml rejects MSVC for ARM). Flags mirror the official
-# docs/backend/snapdragon/CMakeUserPresets.json "arm64-windows-snapdragon" preset.
+# PREBUILT_LIB_DIR must be set for the host configure too, otherwise the SDK's
+# hexagon_fun.cmake string(FIND ...) calls fail (this mirrors the official
+# docs/backend/snapdragon/CMakeUserPresets.json "arm64-windows-snapdragon" preset).
 
 on:
   workflow_dispatch:
   push:
 
+env:
+  SDK_ROOT: C:\Qualcomm\6.6.0.0
+  SDK_URL: https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.6.0.0/hexagon-sdk-v6.6.0.0-arm64-wos.tar.xz
+  LLAMA_URL: https://github.com/ggml-org/llama.cpp/archive/dda305e964f924143fe54cdfceb123aeac72d1bc.tar.gz
+  ARCH_FLAGS: '-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -D_GNU_SOURCE'
+
 jobs:
-  build:
+  llama:
     runs-on: windows-11-arm
     timeout-minutes: 120
     steps:
       - name: fetch llama.cpp (v68 support commit)
         shell: pwsh
         run: |
-          curl.exe -sL -o llama.tar.gz https://github.com/ggml-org/llama.cpp/archive/dda305e964f924143fe54cdfceb123aeac72d1bc.tar.gz
+          curl.exe -sL -o llama.tar.gz $env:LLAMA_URL
           tar.exe -xzf llama.tar.gz
 
       - name: fetch trimmed Hexagon SDK (arm64-wos)
         shell: pwsh
         run: |
-          curl.exe -sL -o sdk.tar.xz https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.6.0.0/hexagon-sdk-v6.6.0.0-arm64-wos.tar.xz
+          curl.exe -sL -o sdk.tar.xz $env:SDK_URL
           New-Item -ItemType Directory -Force -Path C:\Qualcomm | Out-Null
           tar.exe -xf sdk.tar.xz -C C:\Qualcomm
-          Test-Path 'C:\Qualcomm\6.6.0.0\tools\HEXAGON_Tools\19.0.07\Tools\bin\hexagon-clang.exe'
+          Test-Path "$env:SDK_ROOT\tools\HEXAGON_Tools\19.0.07\Tools\bin\hexagon-clang.exe"
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -48,32 +56,21 @@ jobs:
       - name: configure and build
         shell: pwsh
         run: |
-          $sdk = 'C:\Qualcomm\6.6.0.0'
-          $env:HEXAGON_SDK_ROOT   = $sdk
-          $env:HEXAGON_TOOLS_ROOT = "$sdk\tools\HEXAGON_Tools\19.0.07"
-          $arch = '-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -D_GNU_SOURCE'
+          $env:HEXAGON_SDK_ROOT   = $env:SDK_ROOT
+          $env:HEXAGON_TOOLS_ROOT = "$env:SDK_ROOT\tools\HEXAGON_Tools\19.0.07"
           cd llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc
           cmake -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=clang-cl `
-            -DCMAKE_CXX_COMPILER=clang-cl `
-            -DCMAKE_C_FLAGS="$arch" `
-            -DCMAKE_CXX_FLAGS="$arch" `
-            -DHEXAGON_SDK_ROOT="$sdk" `
+            -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl `
+            -DCMAKE_C_FLAGS="$env:ARCH_FLAGS" -DCMAKE_CXX_FLAGS="$env:ARCH_FLAGS" `
+            -DHEXAGON_SDK_ROOT="$env:HEXAGON_SDK_ROOT" `
             -DHEXAGON_TOOLS_ROOT="$env:HEXAGON_TOOLS_ROOT" `
-            -DGGML_HEXAGON=ON `
-            -DGGML_OPENCL=OFF `
-            -DGGML_OPENMP=OFF `
-            -DGGML_LLAMAFILE=OFF `
-            -DGGML_CCACHE=OFF `
-            -DLLAMA_OPENSSL=OFF `
-            -DLLAMA_CURL=OFF `
-            -DLLAMA_BUILD_TESTS=OFF
+            -DPREBUILT_LIB_DIR=windows_aarch64 `
+            -DGGML_HEXAGON=ON -DGGML_OPENCL=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF -DGGML_CCACHE=OFF `
+            -DLLAMA_OPENSSL=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF
           cmake --build build -j 4
-          Write-Host "=== binaries ==="
-          Get-ChildItem build/bin -ErrorAction SilentlyContinue | Select-Object Name,Length
-          Write-Host "=== skels ==="
-          Get-ChildItem build -Recurse -Filter 'libggml-htp-*.so' | Select-Object FullName,Length
+          Write-Host "=== binaries ==="; Get-ChildItem build/bin -ErrorAction SilentlyContinue | Select-Object Name,Length
+          Write-Host "=== skels ==="; Get-ChildItem build -Recurse -Filter 'libggml-htp-*.so' | Select-Object FullName,Length
 
       - uses: actions/upload-artifact@v4
         with:
@@ -82,4 +79,85 @@ jobs:
             llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc/build/bin/*.exe
             llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc/build/bin/*.dll
             llama.cpp-dda305e964f924143fe54cdfceb123aeac72d1bc/build/**/libggml-htp-*.so
+          if-no-files-found: warn
+
+  whisper:
+    runs-on: windows-11-arm
+    timeout-minutes: 120
+    continue-on-error: true
+    steps:
+      - name: fetch whisper.cpp + llama.cpp (v68 ggml)
+        shell: pwsh
+        run: |
+          curl.exe -sL -o whisper.tar.gz https://github.com/ggml-org/whisper.cpp/archive/refs/heads/master.tar.gz
+          tar.exe -xzf whisper.tar.gz
+          curl.exe -sL -o llama.tar.gz $env:LLAMA_URL
+          tar.exe -xzf llama.tar.gz
+
+      - name: fetch trimmed Hexagon SDK (arm64-wos)
+        shell: pwsh
+        run: |
+          curl.exe -sL -o sdk.tar.xz $env:SDK_URL
+          New-Item -ItemType Directory -Force -Path C:\Qualcomm | Out-Null
+          tar.exe -xf sdk.tar.xz -C C:\Qualcomm
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: ensure llvm clang
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang-cl -ErrorAction SilentlyContinue)) {
+            winget install --id LLVM.LLVM --accept-package-agreements --accept-source-agreements --disable-interactivity
+            $p = Get-ChildItem 'C:\Program Files\LLVM\bin' -Filter clang-cl.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($p) { $p.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8 }
+          }
+          clang-cl --version
+
+      - name: drop in the v68-capable hexagon backend + enable v68 skel
+        shell: pwsh
+        run: |
+          $wsp = (Get-ChildItem -Directory -Filter 'whisper.cpp-*' | Select-Object -First 1).FullName
+          $lsp = (Get-ChildItem -Directory -Filter 'llama.cpp-*' | Select-Object -First 1).FullName
+          Write-Host "whisper: $wsp"
+          Write-Host "llama  : $lsp"
+          Remove-Item -Recurse -Force "$wsp\ggml\src\ggml-hexagon" -ErrorAction SilentlyContinue
+          Copy-Item -Recurse "$lsp\ggml\src\ggml-hexagon" "$wsp\ggml\src\ggml-hexagon"
+          Copy-Item -Force "$lsp\ggml\include\ggml-hexagon.h" "$wsp\ggml\include\ggml-hexagon.h"
+          $cm = "$wsp\ggml\src\ggml-hexagon\CMakeLists.txt"
+          $txt = Get-Content $cm -Raw
+          if ($txt -notmatch 'build_htp_skel\(v68\)') {
+            $txt = $txt -replace 'build_htp_skel\(v73\)', "build_htp_skel(v68)`r`nbuild_htp_skel(v73)"
+            Set-Content -Path $cm -Value $txt -NoNewline
+          }
+          Select-String -Path $cm -Pattern 'build_htp_skel\(' | ForEach-Object { $_.Line.Trim() }
+
+      - name: configure and build whisper-cli
+        shell: pwsh
+        run: |
+          $env:HEXAGON_SDK_ROOT   = $env:SDK_ROOT
+          $env:HEXAGON_TOOLS_ROOT = "$env:SDK_ROOT\tools\HEXAGON_Tools\19.0.07"
+          $wsp = (Get-ChildItem -Directory -Filter 'whisper.cpp-*' | Select-Object -First 1).FullName
+          cd $wsp
+          cmake -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl `
+            -DCMAKE_C_FLAGS="$env:ARCH_FLAGS" -DCMAKE_CXX_FLAGS="$env:ARCH_FLAGS" `
+            -DHEXAGON_SDK_ROOT="$env:HEXAGON_SDK_ROOT" `
+            -DHEXAGON_TOOLS_ROOT="$env:HEXAGON_TOOLS_ROOT" `
+            -DPREBUILT_LIB_DIR=windows_aarch64 `
+            -DGGML_HEXAGON=ON -DGGML_OPENCL=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF -DGGML_CCACHE=OFF `
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build build -j 4
+          Write-Host "=== binaries ==="; Get-ChildItem build/bin -ErrorAction SilentlyContinue | Select-Object Name,Length
+          Write-Host "=== skels ==="; Get-ChildItem build -Recurse -Filter 'libggml-htp-*.so' | Select-Object FullName,Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whisper-v68-arm64-windows
+          path: |
+            whisper.cpp-master/build/bin/*.exe
+            whisper.cpp-master/build/bin/*.dll
+            whisper.cpp-master/build/**/libggml-htp-*.so
           if-no-files-found: warn
